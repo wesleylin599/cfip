@@ -1,0 +1,66 @@
+name: Sync best_ips.txt
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - best_ips.txt
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check best_ips.txt
+        id: check
+        shell: bash
+        run: |
+          FILE="best_ips.txt"
+
+          if [ ! -f "$FILE" ]; then
+            echo "File not found: $FILE"
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ ! -s "$FILE" ]; then
+            echo "File is empty: $FILE"
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "File is not empty."
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push file to release
+        if: steps.check.outputs.valid == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin release
+
+          git checkout release
+
+          cp ../cfip/best_ips.txt ./best_ips.txt
+
+          git add best_ips.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Sync best_ips.txt"
+          git push origin release

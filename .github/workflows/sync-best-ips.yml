@@ -1,0 +1,64 @@
+name: Sync best_ips.txt
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - best_ips.txt
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check best_ips.txt
+        id: check
+        run: |
+          if [ ! -s best_ips.txt ]; then
+            echo "best_ips.txt is empty, skip sync."
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "best_ips.txt is not empty."
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+
+      - name: Sync to best-ip branch
+        if: steps.check.outputs.valid == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 保存 main 中的 best_ips.txt
+          cp best_ips.txt /tmp/best_ips.txt
+
+          # 获取目标分支
+          git fetch origin best-ip
+
+          # 切换到目标分支
+          git checkout -B best-ip origin/best-ip
+
+          # 将 main 中的文件复制过来
+          cp /tmp/best_ips.txt best_ips.txt
+
+          git add best_ips.txt
+
+          # 内容没有变化，不提交
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+
+          git commit -m "Update best_ips.txt"
+
+          git push origin best-ip
