@@ -1,90 +1,60 @@
 #!/usr/bin/env python3
 
-import glob
-import ipaddress
-import os
+from pathlib import Path
 
 
-RESULT_DIR = "results"
-OUTPUT = "cidrip.txt"
+RESULTS_DIR = Path("results")
+OUTPUT_FILE = Path("cidrip.txt")
 
 
-def ip_sort(line):
-
+def ip_sort_key(line):
     ip = line.split(":", 1)[0]
 
-    return ipaddress.ip_address(ip)
+    try:
+        return tuple(int(x) for x in ip.split("."))
+    except Exception:
+        return (999, 999, 999, 999)
 
 
 def main():
+    if not RESULTS_DIR.exists():
+        raise RuntimeError("results directory not found")
 
-    files = sorted(
-        glob.glob(
-            os.path.join(
-                RESULT_DIR,
-                "part_*.txt"
-            )
-        )
+    lines = set()
+
+    for file in sorted(RESULTS_DIR.glob("part_*.txt")):
+        print(f"[READ] {file}")
+
+        with file.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                if "#" not in line:
+                    continue
+
+                lines.add(line)
+
+    sorted_lines = sorted(
+        lines,
+        key=ip_sort_key
     )
 
-    print(
-        f"Found {len(files)} result files"
-    )
-
-    data = set()
-
-    for filename in files:
-
-        print(
-            f"Reading {filename}"
-        )
-
-        try:
-
-            with open(
-                filename,
-                "r",
-                encoding="utf-8"
-            ) as f:
-
-                for line in f:
-
-                    line = line.strip()
-
-                    if line:
-                        data.add(line)
-
-        except Exception as e:
-
-            print(
-                f"Failed: {filename}: {e}"
-            )
-
-    result = sorted(
-        data,
-        key=ip_sort
-    )
-
-    with open(
-        OUTPUT,
+    with OUTPUT_FILE.open(
         "w",
         encoding="utf-8"
     ) as f:
 
-        for line in result:
-
-            f.write(
-                line + "\n"
-            )
+        for line in sorted_lines:
+            f.write(line + "\n")
 
     print()
-    print(
-        f"Total: {len(result)}"
-    )
-
-    print(
-        f"Output: {OUTPUT}"
-    )
+    print("========================================")
+    print(f"Output : {OUTPUT_FILE}")
+    print(f"Lines  : {len(sorted_lines)}")
+    print("========================================")
 
 
 if __name__ == "__main__":
