@@ -1,4 +1,4 @@
-name: Update CIDR IP List
+name: Generate CIDR IP List
 
 on:
   workflow_dispatch:
@@ -14,22 +14,151 @@ permissions:
   contents: write
 
 jobs:
-  generate:
+
+  prepare:
+    name: Expand CIDR
     runs-on: ubuntu-latest
 
+    outputs:
+      parts: ${{ steps.parts.outputs.parts }}
+
     steps:
+
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
-      - name: Generate IP list
-        run: python generate_cidr_ip.py
+      - name: Expand CIDR
+        run: |
+          python scripts/01_expand.py
 
-      - name: Commit changes
+      - name: Generate matrix
+        id: parts
+        run: |
+          python - <<'PY'
+          import glob
+          import json
+          import os
+
+          files = sorted(
+              glob.glob("parts/part_*.txt")
+          )
+
+          parts = [
+              os.path.basename(x)
+              for x in files
+          ]
+
+          print(json.dumps(parts))
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a"
+          ) as f:
+              f.write(
+                  "parts=" +
+                  json.dumps(parts) +
+                  "\n"
+              )
+          PY
+
+      - name: Upload parts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cidr-parts
+          path: parts/
+
+
+  geoip:
+
+    name: GeoIP ${{ matrix.part }}
+
+    needs: prepare
+
+    runs-on: ubuntu-latest
+
+    strategy:
+
+      fail-fast: false
+
+      max-parallel: 20
+
+      matrix:
+        part: ${{ fromJson(needs.prepare.outputs.parts) }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: |
+          pip install geoip2
+
+      - name: Download GeoIP database
+        run: |
+          wget -q \
+            https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb
+
+      - name: Download IP part
+        uses: actions/download-artifact@v4
+        with:
+          name: cidr-parts
+          path: parts/
+
+      - name: Run GeoIP
+        run: |
+          mkdir -p results
+
+          python scripts/02_geoip.py \
+            --input "parts/${{ matrix.part }}" \
+            --output "results/${{ matrix.part }}"
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.part }}
+          path: results/${{ matrix.part }}
+
+
+  merge:
+
+    name: Merge
+    needs: geoip
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results/
+          merge-multiple: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Merge
+        run: |
+          python scripts/03_merge.py
+
+      - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -37,7 +166,7 @@ jobs:
           git add cidrip.txt
 
           if git diff --cached --quiet; then
-            echo "No changes."
+            echo "No changes"
           else
             git commit -m "Update cidrip.txt"
             git push
