@@ -68,7 +68,7 @@ jobs:
 
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
 
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
