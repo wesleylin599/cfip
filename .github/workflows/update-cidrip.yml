@@ -1,11 +1,14 @@
-name: Generate CIDR IP List
+name: Cloudflare CIDR IP Probe
 
 on:
+
   workflow_dispatch:
 
   push:
     paths:
       - "cidr.txt"
+      - "scripts/**"
+      - ".github/workflows/cidrip.yml"
 
   schedule:
     - cron: "0 2 * * *"
@@ -13,19 +16,31 @@ on:
 permissions:
   contents: write
 
+# 防止两个 workflow 同时修改 main
+concurrency:
+  group: cfip-cidrip
+  cancel-in-progress: false
+
+
 jobs:
 
+  # ==================================================
+  # 1. CIDR → IP 分片
+  # ==================================================
+
   prepare:
+
     name: Expand CIDR
+
     runs-on: ubuntu-latest
 
     outputs:
-      parts: ${{ steps.parts.outputs.parts }}
+      parts: ${{ steps.matrix.outputs.parts }}
 
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -34,10 +49,12 @@ jobs:
 
       - name: Expand CIDR
         run: |
+          rm -rf parts
           python scripts/01_expand.py
 
-      - name: Generate matrix
-        id: parts
+      - name: Generate Matrix
+        id: matrix
+        shell: bash
         run: |
           python - <<'PY'
           import glob
@@ -48,34 +65,39 @@ jobs:
               glob.glob("parts/part_*.txt")
           )
 
-          parts = [
+          names = [
               os.path.basename(x)
               for x in files
           ]
 
-          print(json.dumps(parts))
+          print(f"Parts: {len(names)}")
 
           with open(
               os.environ["GITHUB_OUTPUT"],
               "a"
           ) as f:
+
               f.write(
                   "parts=" +
-                  json.dumps(parts) +
+                  json.dumps(names) +
                   "\n"
               )
           PY
 
-      - name: Upload parts
+      - name: Upload Parts
         uses: actions/upload-artifact@v4
         with:
           name: cidr-parts
           path: parts/
 
 
-  geoip:
+  # ==================================================
+  # 2. 并行 CF-Ray 检测
+  # ==================================================
 
-    name: GeoIP ${{ matrix.part }}
+  probe:
+
+    name: Probe ${{ matrix.part }}
 
     needs: prepare
 
@@ -85,41 +107,38 @@ jobs:
 
       fail-fast: false
 
+      # 最多同时运行 20 个 GitHub Runner
       max-parallel: 20
 
       matrix:
-        part: ${{ fromJson(needs.prepare.outputs.parts) }}
+        part: ${{ fromJSON(needs.prepare.outputs.parts) }}
 
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
-      - name: Install dependencies
+      - name: Install dependency
         run: |
-          pip install geoip2
+          pip install airportsdata
 
-      - name: Download GeoIP database
-        run: |
-          wget -q \
-            https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb
-
-      - name: Download IP part
-        uses: actions/download-artifact@v4
+      - name: Download parts
+        uses: actions/download-artifact@v5
         with:
           name: cidr-parts
           path: parts/
 
-      - name: Run GeoIP
+      - name: Probe Cloudflare
         run: |
+
           mkdir -p results
 
-          python scripts/02_geoip.py \
+          python scripts/02_cfprobe.py \
             --input "parts/${{ matrix.part }}" \
             --output "results/${{ matrix.part }}"
 
@@ -130,20 +149,25 @@ jobs:
           path: results/${{ matrix.part }}
 
 
+  # ==================================================
+  # 3. 合并
+  # ==================================================
+
   merge:
 
-    name: Merge
-    needs: geoip
+    name: Merge Results
+
+    needs: probe
 
     runs-on: ubuntu-latest
 
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Download all results
-        uses: actions/download-artifact@v4
+      - name: Download results
+        uses: actions/download-artifact@v5
         with:
           pattern: result-*
           path: results/
@@ -158,20 +182,30 @@ jobs:
         run: |
           python scripts/03_merge.py
 
+      # ==============================================
+      # 4. 提交 cidrip.txt
+      # ==============================================
+
       - name: Commit
         run: |
+
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add cidrip.txt
-      
+
           if git diff --cached --quiet; then
+
             echo "No changes"
             exit 0
+
           fi
-      
+
           git commit -m "Update cidrip.txt"
-      
+
+          # 防止本地 / 其他 workflow 已经更新 main
           git pull --rebase origin main
-      
+
           git push origin HEAD:main
