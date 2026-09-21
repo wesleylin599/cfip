@@ -1,79 +1,93 @@
-import glob
+import argparse
 import ipaddress
 import os
+import geoip2.database
 
 
-RESULT_DIR = "results"
-OUTPUT_FILE = "cidrip.txt"
+parser = argparse.ArgumentParser()
+
+parser.add_argument(
+    "--input",
+    required=True
+)
+
+parser.add_argument(
+    "--output",
+    required=True
+)
+
+parser.add_argument(
+    "--database",
+    default="GeoLite2-Country.mmdb"
+)
+
+args = parser.parse_args()
 
 
-lines = set()
-
-
-files = glob.glob(
-    os.path.join(
-        RESULT_DIR,
-        "part_*.txt"
-    )
+os.makedirs(
+    os.path.dirname(args.output) or ".",
+    exist_ok=True
 )
 
 
-print(
-    f"Found {len(files)} result files"
+reader = geoip2.database.Reader(
+    args.database
 )
 
 
-for filename in files:
-
-    print(
-        f"Reading {filename}"
-    )
-
-    with open(
-        filename,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        for line in f:
-
-            line = line.strip()
-
-            if line:
-                lines.add(line)
-
-
-def sort_key(line):
-
-    ip = line.split(":", 1)[0]
-
-    return ipaddress.ip_address(ip)
-
-
-sorted_lines = sorted(
-    lines,
-    key=sort_key
-)
+count = 0
 
 
 with open(
-    OUTPUT_FILE,
+    args.input,
+    "r",
+    encoding="utf-8"
+) as fin, open(
+    args.output,
     "w",
     encoding="utf-8"
-) as f:
+) as fout:
 
-    for line in sorted_lines:
+    for line in fin:
 
-        f.write(
-            line + "\n"
+        ip = line.strip()
+
+        if not ip:
+            continue
+
+        try:
+
+            # 确保是合法 IPv4
+            ipaddress.ip_address(ip)
+
+            response = reader.country(ip)
+
+            country = (
+                response.country.iso_code
+                or "XX"
+            )
+
+            country = country.upper()
+
+        except Exception:
+
+            country = "XX"
+
+        fout.write(
+            f"{ip}:443#{country}\n"
         )
 
+        count += 1
 
-print()
-print(
-    f"Total: {len(sorted_lines)}"
-)
+        if count % 10000 == 0:
+
+            print(
+                f"{args.input}: {count}"
+            )
+
+
+reader.close()
 
 print(
-    f"Output: {OUTPUT_FILE}"
+    f"Finished {args.input}: {count}"
 )
