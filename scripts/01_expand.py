@@ -1,56 +1,25 @@
 #!/usr/bin/env python3
 
 import ipaddress
+import json
 import os
+import shutil
+from pathlib import Path
 
-CIDR_FILE = "cidr.txt"
-PART_DIR = "parts"
+CIDR_FILE = Path("cidr.txt")
+PARTS_DIR = Path("parts")
 
-# 每个 GitHub Actions Job 处理多少 IP
 CHUNK_SIZE = 5000
 
 
-def main():
-    os.makedirs(PART_DIR, exist_ok=True)
+def read_cidrs():
+    if not CIDR_FILE.exists():
+        raise FileNotFoundError("cidr.txt not found")
 
-    part_id = 1
-    count = 0
-    total = 0
+    networks = []
 
-    output = None
-
-    def open_part():
-        nonlocal part_id, count, output
-
-        if output:
-            output.close()
-
-        filename = os.path.join(
-            PART_DIR,
-            f"part_{part_id:05d}.txt"
-        )
-
-        print(f"Create: {filename}")
-
-        output = open(
-            filename,
-            "w",
-            encoding="utf-8"
-        )
-
-        count = 0
-        part_id += 1
-
-    open_part()
-
-    with open(
-        CIDR_FILE,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        for line in f:
-
+    with CIDR_FILE.open("r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, 1):
             line = line.strip()
 
             if not line:
@@ -60,61 +29,93 @@ def main():
                 continue
 
             try:
-                network = ipaddress.ip_network(
-                    line,
-                    strict=False
-                )
-            except ValueError:
-                print(
-                    f"Invalid CIDR: {line}"
-                )
+                network = ipaddress.ip_network(line, strict=False)
+            except ValueError as e:
+                print(f"[WARN] Invalid CIDR at line {line_no}: {line}")
+                print(f"       {e}")
                 continue
 
             if network.version != 4:
-                print(
-                    f"Skip IPv6: {network}"
-                )
+                print(f"[WARN] IPv6 skipped: {network}")
                 continue
 
-            print(
-                f"Processing: {network}"
-            )
+            networks.append(network)
 
-            for ip in network.hosts():
+    return networks
 
-                output.write(
-                    str(ip) + "\n"
-                )
 
-                count += 1
-                total += 1
+def main():
+    networks = read_cidrs()
 
-                if count >= CHUNK_SIZE:
-                    open_part()
+    if not networks:
+        raise RuntimeError("No valid IPv4 CIDR found in cidr.txt")
 
-    if output:
-        output.close()
+    if PARTS_DIR.exists():
+        shutil.rmtree(PARTS_DIR)
 
-    # 删除最后可能产生的空文件
-    for filename in os.listdir(PART_DIR):
+    PARTS_DIR.mkdir(parents=True, exist_ok=True)
 
-        path = os.path.join(
-            PART_DIR,
-            filename
-        )
+    part_index = 1
+    current = []
 
-        if os.path.isfile(path) and os.path.getsize(path) == 0:
-            os.remove(path)
+    total = 0
 
-    parts = len(
-        os.listdir(PART_DIR)
+    def flush():
+        nonlocal part_index, current
+
+        if not current:
+            return
+
+        filename = PARTS_DIR / f"part_{part_index:05d}.txt"
+
+        with filename.open("w", encoding="utf-8") as f:
+            for ip in current:
+                f.write(f"{ip}\n")
+
+        print(f"[WRITE] {filename} -> {len(current)} IPs")
+
+        part_index += 1
+        current = []
+
+    for network in networks:
+        print(f"[CIDR] {network}")
+
+        # 使用 hosts()：
+        # IPv4 CIDR 的 network address / broadcast address 不参与探测。
+        for ip in network.hosts():
+            current.append(str(ip))
+            total += 1
+
+            if len(current) >= CHUNK_SIZE:
+                flush()
+
+    flush()
+
+    parts = sorted(
+        str(p)
+        for p in PARTS_DIR.glob("part_*.txt")
     )
 
+    if not parts:
+        raise RuntimeError("No IP parts generated")
+
+    matrix = {
+        "include": [
+            {
+                "part": os.path.basename(p)
+            }
+            for p in parts
+        ]
+    }
+
+    with open("matrix.json", "w", encoding="utf-8") as f:
+        json.dump(matrix, f, ensure_ascii=False)
+
     print()
-    print("====================")
-    print(f"Total IP : {total}")
-    print(f"Parts    : {parts}")
-    print("====================")
+    print("========================================")
+    print(f"Total IPs : {total}")
+    print(f"Parts     : {len(parts)}")
+    print("========================================")
 
 
 if __name__ == "__main__":
