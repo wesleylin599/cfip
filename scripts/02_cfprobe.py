@@ -4,46 +4,55 @@ import argparse
 import os
 import re
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import as_completed
-
-import airportsdata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 DOMAIN = "api.090227.xyz"
 PORT = 443
 
-# 单个 Worker 内部并发
 WORKERS = 30
 
-# curl 超时
 CONNECT_TIMEOUT = 5
 MAX_TIME = 8
 
 
-# 加载 IATA 数据
-AIRPORTS = airportsdata.load("IATA")
+# Cloudflare Colo → 国家
+# 这里不要依赖 GeoIP
+COLO_COUNTRY = {
 
-
-# Cloudflare Colo 的少量特殊/常见代码补充
-SPECIAL_COUNTRIES = {
-    "AMS": "NL",
-    "NRT": "JP",
-    "HND": "JP",
-    "KIX": "JP",
+    # Asia
     "ICN": "KR",
-    "GMP": "KR",
+    "NRT": "JP",
+    "KIX": "JP",
     "HKG": "HK",
-    "SIN": "SG",
     "TPE": "TW",
-    "FRA": "DE",
-    "MUC": "DE",
+    "SIN": "SG",
+    "KUL": "MY",
+    "BKK": "TH",
+    "CGK": "ID",
+    "MNL": "PH",
+    "SGN": "VN",
+    "HAN": "VN",
+
+    # Oceania
+    "SYD": "AU",
+    "MEL": "AU",
+    "BNE": "AU",
+    "PER": "AU",
+    "AKL": "NZ",
+
+    # Europe
+    "AMS": "NL",
     "LHR": "GB",
     "MAN": "GB",
+    "FRA": "DE",
+    "MUC": "DE",
     "CDG": "FR",
+    "MRS": "FR",
     "MAD": "ES",
     "BCN": "ES",
     "FCO": "IT",
+    "MXP": "IT",
     "ZRH": "CH",
     "VIE": "AT",
     "WAW": "PL",
@@ -52,15 +61,18 @@ SPECIAL_COUNTRIES = {
     "ARN": "SE",
     "HEL": "FI",
     "OSL": "NO",
+    "DUB": "IE",
     "BRU": "BE",
     "LIS": "PT",
-    "DUB": "IE",
+    "IST": "TR",
+    "ATH": "GR",
+    "BUC": "RO",
+    "SOF": "BG",
+    "RIX": "LV",
+    "TLL": "EE",
+    "VNO": "LT",
 
-    "SYD": "AU",
-    "MEL": "AU",
-    "BNE": "AU",
-    "PER": "AU",
-
+    # North America
     "LAX": "US",
     "SJC": "US",
     "SFO": "US",
@@ -87,62 +99,47 @@ SPECIAL_COUNTRIES = {
     "YUL": "CA",
     "YYC": "CA",
 
+    "MEX": "MX",
+
+    # South America
     "GRU": "BR",
     "EZE": "AR",
     "SCL": "CL",
     "LIM": "PE",
     "BOG": "CO",
 
-    "JNB": "ZA",
-    "CPT": "ZA",
-
+    # Middle East
     "DXB": "AE",
     "AUH": "AE",
     "DOH": "QA",
     "RUH": "SA",
+    "JED": "SA",
     "TLV": "IL",
 
-    "DEL": "IN",
-    "BOM": "IN",
-    "MAA": "IN",
-    "BLR": "IN",
-    "HYD": "IN",
-
-    "BKK": "TH",
-    "KUL": "MY",
-    "CGK": "ID",
-    "MNL": "PH",
-    "SGN": "VN",
-    "HAN": "VN",
+    # Africa
+    "JNB": "ZA",
+    "CPT": "ZA",
+    "NBO": "KE",
+    "LOS": "NG",
+    "CAI": "EG",
 }
 
 
-def colo_to_country(colo):
-    colo = colo.upper()
+def get_country(colo):
 
-    if colo in SPECIAL_COUNTRIES:
-        return SPECIAL_COUNTRIES[colo]
-
-    airport = AIRPORTS.get(colo)
-
-    if airport:
-        country = airport.get("country")
-
-        if country:
-            return country.upper()
-
-    return "XX"
+    return COLO_COUNTRY.get(
+        colo.upper(),
+        "XX"
+    )
 
 
 def probe(ip):
-    """
-    强制把 api.090227.xyz:443
-    连接到指定 IP。
-    """
 
     command = [
         "curl",
+
         "-sS",
+
         "--noproxy",
         "*",
 
@@ -168,19 +165,23 @@ def probe(ip):
 
         result = subprocess.run(
             command,
+
             stdout=subprocess.PIPE,
+
             stderr=subprocess.DEVNULL,
+
             text=True,
-            timeout=MAX_TIME + 3
+
+            timeout=MAX_TIME + 3,
         )
 
         headers = result.stdout
 
-        # HTTP 状态
+        # HTTP status
         status_match = re.search(
             r"HTTP/\d(?:\.\d)?\s+(\d+)",
             headers,
-            re.IGNORECASE
+            re.IGNORECASE,
         )
 
         status = (
@@ -193,62 +194,42 @@ def probe(ip):
         ray_match = re.search(
             r"^CF-RAY:\s*([^\r\n]+)",
             headers,
-            re.IGNORECASE |
-            re.MULTILINE
+            re.IGNORECASE | re.MULTILINE,
         )
 
         if not ray_match:
-            return {
-                "ip": ip,
-                "status": status,
-                "colo": "",
-                "country": "XX",
-                "success": False,
-            }
+
+            return None
 
         ray = ray_match.group(1).strip()
 
-        # CF-Ray:
+        # 例如：
         #
         # a3e70984b87af5da-AMS
         #
         colo_match = re.search(
-            r"-([A-Z0-9]{3})$",
-            ray
+            r"-([A-Z]{3})$",
+            ray,
         )
 
         if not colo_match:
-            return {
-                "ip": ip,
-                "status": status,
-                "colo": "",
-                "country": "XX",
-                "success": False,
-            }
+
+            return None
 
         colo = colo_match.group(1)
 
-        country = colo_to_country(
-            colo
-        )
+        country = get_country(colo)
 
-        return {
-            "ip": ip,
-            "status": status,
-            "colo": colo,
-            "country": country,
-            "success": True,
-        }
+        return (
+            ip,
+            colo,
+            country,
+            status,
+        )
 
     except Exception:
 
-        return {
-            "ip": ip,
-            "status": "000",
-            "colo": "",
-            "country": "XX",
-            "success": False,
-        }
+        return None
 
 
 def main():
@@ -257,25 +238,26 @@ def main():
 
     parser.add_argument(
         "--input",
-        required=True
+        required=True,
     )
 
     parser.add_argument(
         "--output",
-        required=True
+        required=True,
     )
 
     args = parser.parse_args()
 
     os.makedirs(
-        os.path.dirname(args.output) or ".",
-        exist_ok=True
+        os.path.dirname(args.output)
+        or ".",
+        exist_ok=True,
     )
 
     with open(
         args.input,
         "r",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as f:
 
         ips = [
@@ -287,7 +269,7 @@ def main():
     total = len(ips)
 
     print(
-        f"Testing {total} IPs..."
+        f"Testing {total} IPs"
     )
 
     results = []
@@ -301,7 +283,7 @@ def main():
         futures = {
             executor.submit(
                 probe,
-                ip
+                ip,
             ): ip
             for ip in ips
         }
@@ -310,54 +292,57 @@ def main():
             futures
         ):
 
-            result = future.result()
-
             completed += 1
 
-            if result["success"]:
+            ip = futures[future]
 
-                ip = result["ip"]
-                country = result["country"]
+            result = future.result()
 
-                # 最终格式
-                results.append(
-                    f"{ip}:443#{country}"
-                )
+            if result:
+
+                ip, colo, country, status = result
 
                 print(
                     f"[{completed}/{total}] "
                     f"{ip} -> "
-                    f"{result['colo']} "
+                    f"{colo} -> "
                     f"{country} "
-                    f"HTTP {result['status']}"
+                    f"HTTP={status}"
                 )
+
+                # 只输出已知国家
+                if country != "XX":
+
+                    results.append(
+                        f"{ip}:443#{country}"
+                    )
 
             else:
 
                 print(
                     f"[{completed}/{total}] "
-                    f"{result['ip']} -> FAILED"
+                    f"{ip} -> FAILED"
                 )
 
-    # 排序
-    results.sort()
+    results = sorted(
+        set(results)
+    )
 
     with open(
         args.output,
         "w",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as f:
 
         for line in results:
-            f.write(line + "\n")
+
+            f.write(
+                line + "\n"
+            )
 
     print()
     print(
-        f"Success: {len(results)}/{total}"
-    )
-
-    print(
-        f"Output: {args.output}"
+        f"Success: {len(results)}"
     )
 
 
