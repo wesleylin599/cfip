@@ -1,79 +1,91 @@
+#!/usr/bin/env python3
+
 import glob
 import ipaddress
 import os
 
 
 RESULT_DIR = "results"
-OUTPUT_FILE = "cidrip.txt"
+OUTPUT = "cidrip.txt"
 
 
-lines = set()
-
-
-files = glob.glob(
-    os.path.join(
-        RESULT_DIR,
-        "part_*.txt"
-    )
-)
-
-
-print(
-    f"Found {len(files)} result files"
-)
-
-
-for filename in files:
-
-    print(
-        f"Reading {filename}"
-    )
-
-    with open(
-        filename,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        for line in f:
-
-            line = line.strip()
-
-            if line:
-                lines.add(line)
-
-
-def sort_key(line):
+def ip_sort(line):
 
     ip = line.split(":", 1)[0]
 
     return ipaddress.ip_address(ip)
 
 
-sorted_lines = sorted(
-    lines,
-    key=sort_key
-)
+def main():
 
+    files = sorted(
+        glob.glob(
+            os.path.join(
+                RESULT_DIR,
+                "part_*.txt"
+            )
+        )
+    )
 
-with open(
-    OUTPUT_FILE,
-    "w",
-    encoding="utf-8"
-) as f:
+    print(
+        f"Found {len(files)} result files"
+    )
 
-    for line in sorted_lines:
+    data = set()
 
-        f.write(
-            line + "\n"
+    for filename in files:
+
+        print(
+            f"Reading {filename}"
         )
 
+        try:
 
-print()
-print(
-    f"Total: {len(sorted_lines)}"
-)
+            with open(
+                filename,
+                "r",
+                encoding="utf-8"
+            ) as f:
 
-print(
-    f"Output: {OUTPUT_FILE}"
-)
+                for line in f:
+
+                    line = line.strip()
+
+                    if line:
+                        data.add(line)
+
+        except Exception as e:
+
+            print(
+                f"Failed: {filename}: {e}"
+            )
+
+    result = sorted(
+        data,
+        key=ip_sort
+    )
+
+    with open(
+        OUTPUT,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        for line in result:
+
+            f.write(
+                line + "\n"
+            )
+
+    print()
+    print(
+        f"Total: {len(result)}"
+    )
+
+    print(
+        f"Output: {OUTPUT}"
+    )
+
+
+if __name__ == "__main__":
+    main()
