@@ -1,0 +1,9 @@
+﻿config.json
+git_sync.ps1
+git_sync.sh
+__pycache__/
+_headers
+cfnb.log
+main.py
+setup.ps1
+update_fork.ps1
