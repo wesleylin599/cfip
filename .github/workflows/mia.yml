@@ -1,0 +1,170 @@
+name: Update mai.txt
+
+on:
+  schedule:
+    # 每小时第 5 分钟执行一次
+    - cron: "5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch subscription and extract IPs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SUB_URL='https://sub.mia.xx.kg/sub?host=example.com&uuid=00000000-0000-4000-8000-000000000000'
+
+          echo "Fetching subscription..."
+
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --connect-timeout 15 \
+            --max-time 60 \
+            -A 'v2rayN/edge-tunnel' \
+            "$SUB_URL" \
+            -o /tmp/sub.txt
+
+          # 检查响应是否为空
+          if [ ! -s /tmp/sub.txt ]; then
+            echo "Subscription is empty"
+            exit 1
+          fi
+
+          echo "Decoding Base64 subscription..."
+
+          python3 <<'PY'
+          import base64
+          import re
+          from pathlib import Path
+
+          raw = Path("/tmp/sub.txt").read_text(errors="ignore").strip()
+
+          # 处理普通 Base64 / Base64URL / 换行
+          raw = re.sub(r"\s+", "", raw)
+
+          # Base64 补齐 =
+          raw += "=" * (-len(raw) % 4)
+
+          try:
+              decoded = base64.b64decode(raw).decode("utf-8", errors="ignore")
+          except Exception as e:
+              print(f"Base64 decode failed: {e}")
+              raise SystemExit(1)
+
+          Path("/tmp/decoded.txt").write_text(decoded, encoding="utf-8")
+
+          print("Decoded subscription:")
+          print(decoded[:1000])
+          PY
+
+          echo "Extracting IP addresses..."
+
+          python3 <<'PY'
+          import ipaddress
+          import re
+          from pathlib import Path
+
+          text = Path("/tmp/decoded.txt").read_text(
+              encoding="utf-8",
+              errors="ignore"
+          )
+
+          result = set()
+
+          for line in text.splitlines():
+              line = line.strip()
+
+              if not line:
+                  continue
+
+              # 提取 userinfo 后面的 host:port
+              # 例如：
+              # vless://uuid@1.2.3.4:443?...
+              # trojan://password@1.2.3.4:443?...
+              m = re.search(
+                  r"://[^@]+@(\[[0-9a-fA-F:]+\]|[^:/?#]+)(?::(\d+))?",
+                  line
+              )
+
+              if not m:
+                  continue
+
+              host = m.group(1)
+              port = m.group(2)
+
+              if not port:
+                  continue
+
+              # 去掉 IPv6 []
+              host = host.strip("[]")
+
+              try:
+                  ip = ipaddress.ip_address(host)
+              except ValueError:
+                  continue
+
+              # 只保留公网 IP
+              if (
+                  ip.is_private
+                  or ip.is_loopback
+                  or ip.is_reserved
+                  or ip.is_multicast
+                  or ip.is_unspecified
+                  or ip.is_link_local
+              ):
+                  continue
+
+              result.add(f"{ip}:{port}")
+
+          # 排序，保证每次生成结果稳定
+          ips = sorted(result, key=lambda x: (
+              x.rsplit(":", 1)[0],
+              int(x.rsplit(":", 1)[1])
+          ))
+
+          if not ips:
+              print("No public IPs found!")
+              raise SystemExit(1)
+
+          Path("mai.txt").write_text(
+              "\n".join(ips) + "\n",
+              encoding="utf-8"
+          )
+
+          print(f"Found {len(ips)} public IPs")
+          PY
+
+          echo "Result:"
+          cat mai.txt
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add mai.txt
+
+          if git diff --cached --quiet; then
+            echo "mai.txt has not changed."
+            exit 0
+          fi
+
+          git commit -m "chore: update mai.txt"
+          git push
