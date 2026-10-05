@@ -16,92 +16,89 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch EdgeTunnel subscription
+      - name: Fetch subscription
         shell: bash
         run: |
           set -euo pipefail
 
-          HOST="https://sub.mia.xx.kg"
-
-          UUID="00000000-0000-4000-8000-000000000000"
-
-          SUB_URL="${HOST}/sub?host=example.com&uuid=${UUID}"
-
+          URL='https://sub.mia.xx.kg/sub?host=example.com&uuid=00000000-0000-4000-8000-000000000000'
           UA='v2rayN/edgetunnel (https://github.com/cmliu/edgetunnel)'
 
           echo "Fetching subscription..."
-          echo "URL: ${SUB_URL}"
 
           curl \
             --fail \
+            --location \
             --silent \
             --show-error \
-            --location \
             --retry 3 \
             --connect-timeout 15 \
             --max-time 60 \
             -A "$UA" \
-            "$SUB_URL" \
+            "$URL" \
             -o /tmp/sub.txt
 
           echo "Response size:"
           wc -c /tmp/sub.txt
 
-          echo "Response first 100 characters:"
-          head -c 100 /tmp/sub.txt
+          echo "Response preview:"
+          head -c 120 /tmp/sub.txt | cat -v
           echo
 
-      - name: Decode and extract preferred IPs
+      - name: Decode subscription and extract IPs
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 <<'PY'
+          python3 - <<'PY'
           import base64
           import ipaddress
           import re
           from pathlib import Path
 
           UUID = "00000000-0000-4000-8000-000000000000"
+          INPUT = Path("/tmp/sub.txt")
+          OUTPUT = Path("mai.txt")
 
-          raw = Path("/tmp/sub.txt").read_text(
+          raw = INPUT.read_text(
               encoding="utf-8",
               errors="ignore"
           ).strip()
 
-          print("Raw response length:", len(raw))
+          if not raw:
+              print("ERROR: empty response")
+              raise SystemExit(1)
 
-          # EdgeTunnel 当前源码：
-          #
-          # const 返回订阅内容 = atob(await response.text())
-          #
-          # 所以这里严格按照它的方式进行 Base64 解码。
+          print(f"Response length: {len(raw)}")
+
+          # Base64 解码
+          encoded = re.sub(r"\s+", "", raw)
+          encoded = encoded.replace("-", "+").replace("_", "/")
+          encoded += "=" * (-len(encoded) % 4)
 
           try:
-              decoded = base64.b64decode(raw).decode(
+              decoded = base64.b64decode(
+                  encoded,
+                  validate=False
+              ).decode(
                   "utf-8",
                   errors="ignore"
               )
           except Exception as e:
-              print("Base64 decode failed:", e)
-
-              print()
+              print(f"ERROR: Base64 decode failed: {e}")
               print("Response preview:")
               print(raw[:500])
-
               raise SystemExit(1)
 
-          print("Decoded subscription length:", len(decoded))
+          print(f"Decoded length: {len(decoded)}")
 
-          # --------------------------------------------------
-          # 按 EdgeTunnel 源码寻找：
+          preferred = set()
+          matched = 0
+
+          # EdgeTunnel 的核心判断：
           #
           # UUID + example.com
           #
-          # --------------------------------------------------
-
-          result = set()
-
           for line in decoded.splitlines():
 
               line = line.strip()
@@ -109,25 +106,16 @@ jobs:
               if not line:
                   continue
 
-              # 与 EdgeTunnel 源码一致：
-              #
-              # if (
-              #   行内容.includes(UUID)
-              #   &&
-              #   行内容.includes('example.com')
-              # )
-
               if UUID not in line:
                   continue
 
               if "example.com" not in line:
                   continue
 
-              # 与 EdgeTunnel 源码一致：
-              #
-              # const 地址匹配 =
-              #     行内容.match(/:\/\/[^@]+@([^?]+)/);
+              matched += 1
 
+              # 对应 EdgeTunnel：
+              # /:\/\/[^@]+@([^?]+)/
               match = re.search(
                   r"://[^@]+@([^?]+)",
                   line
@@ -138,10 +126,108 @@ jobs:
 
               address = match.group(1)
 
-              # 去掉可能存在的 #备注
+              # 去掉 #备注
               address = address.split("#", 1)[0]
 
-              # EdgeTunnel 实际上这里不强制要求是 IP，
-              # 但你的 mai.txt 是 cfip，因此这里只保留 IP。
+              # IPv4
+              m = re.fullmatch(
+                  r"((?:\d{1,3}\.){3}\d{1,3}):(\d+)",
+                  address
+              )
 
-              if ":" not in address:
+              if m:
+                  ip = m.group(1)
+                  port = int(m.group(2))
+
+                  try:
+                      parsed = ipaddress.ip_address(ip)
+                  except ValueError:
+                      continue
+
+                  if not parsed.is_global:
+                      continue
+
+                  if not 1 <= port <= 65535:
+                      continue
+
+                  preferred.add(f"{ip}:{port}")
+                  continue
+
+              # IPv6
+              m = re.fullmatch(
+                  r"\[([0-9a-fA-F:]+)\]:(\d+)",
+                  address
+              )
+
+              if m:
+                  ip = m.group(1)
+                  port = int(m.group(2))
+
+                  try:
+                      parsed = ipaddress.ip_address(ip)
+                  except ValueError:
+                      continue
+
+                  if not parsed.is_global:
+                      continue
+
+                  if not 1 <= port <= 65535:
+                      continue
+
+                  preferred.add(f"[{ip}]:{port}")
+
+          print(f"Matched preferred nodes: {matched}")
+          print(f"Public IPs found: {len(preferred)}")
+
+          if not preferred:
+              print("")
+              print("ERROR: No preferred IPs found.")
+              print("")
+              print("Decoded response preview:")
+              print(decoded[:1000])
+              raise SystemExit(1)
+
+          def sort_key(value):
+              if value.startswith("["):
+                  ip = value.split("]:", 1)[0][1:]
+                  port = int(value.split("]:", 1)[1])
+              else:
+                  ip, port = value.rsplit(":", 1)
+                  port = int(port)
+
+              return (
+                  ipaddress.ip_address(ip).version,
+                  int(ipaddress.ip_address(ip)),
+                  port
+              )
+
+          result = sorted(preferred, key=sort_key)
+
+          OUTPUT.write_text(
+              "\n".join(result) + "\n",
+              encoding="utf-8"
+          )
+
+          print("")
+          print("Generated mai.txt:")
+          print(OUTPUT.read_text())
+
+          PY
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add mai.txt
+
+          if git diff --cached --quiet; then
+            echo "mai.txt has not changed."
+            exit 0
+          fi
+
+          git commit -m "chore: update preferred IPs"
+          git push
