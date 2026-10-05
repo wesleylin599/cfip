@@ -2,7 +2,6 @@ name: Update mai.txt
 
 on:
   schedule:
-    # 每小时第 5 分钟执行一次
     - cron: "5 * * * *"
   workflow_dispatch:
 
@@ -17,14 +16,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch subscription and extract IPs
+      - name: Fetch and parse subscription
         shell: bash
         run: |
           set -euo pipefail
 
           SUB_URL='https://sub.mia.xx.kg/sub?host=example.com&uuid=00000000-0000-4000-8000-000000000000'
 
-          echo "Fetching subscription..."
+          echo "Fetching:"
+          echo "$SUB_URL"
 
           curl \
             --fail \
@@ -38,79 +38,161 @@ jobs:
             "$SUB_URL" \
             -o /tmp/sub.txt
 
-          # 检查响应是否为空
-          if [ ! -s /tmp/sub.txt ]; then
-            echo "Subscription is empty"
-            exit 1
-          fi
+          echo "Response size:"
+          wc -c /tmp/sub.txt
 
-          echo "Decoding Base64 subscription..."
+          echo "First 200 bytes:"
+          head -c 200 /tmp/sub.txt | cat -v
+          echo
 
           python3 <<'PY'
           import base64
-          import re
-          from pathlib import Path
-
-          raw = Path("/tmp/sub.txt").read_text(errors="ignore").strip()
-
-          # 处理普通 Base64 / Base64URL / 换行
-          raw = re.sub(r"\s+", "", raw)
-
-          # Base64 补齐 =
-          raw += "=" * (-len(raw) % 4)
-
-          try:
-              decoded = base64.b64decode(raw).decode("utf-8", errors="ignore")
-          except Exception as e:
-              print(f"Base64 decode failed: {e}")
-              raise SystemExit(1)
-
-          Path("/tmp/decoded.txt").write_text(decoded, encoding="utf-8")
-
-          print("Decoded subscription:")
-          print(decoded[:1000])
-          PY
-
-          echo "Extracting IP addresses..."
-
-          python3 <<'PY'
           import ipaddress
           import re
           from pathlib import Path
 
-          text = Path("/tmp/decoded.txt").read_text(
-              encoding="utf-8",
-              errors="ignore"
-          )
+          raw_bytes = Path("/tmp/sub.txt").read_bytes()
+
+          raw = raw_bytes.decode("utf-8", errors="ignore").strip()
+
+          print("Content length:", len(raw))
+
+          # --------------------------------------------------
+          # 1. 优先判断是否已经是明文订阅
+          # --------------------------------------------------
+
+          if re.search(
+              r'(?m)^(?:vless|vmess|trojan|ss|ssr)://',
+              raw
+          ):
+              print("Detected plain-text subscription.")
+              decoded = raw
+
+          else:
+              # --------------------------------------------------
+              # 2. 尝试 Base64
+              # --------------------------------------------------
+
+              compact = re.sub(r'\s+', '', raw)
+
+              # Base64URL -> Base64
+              compact = compact.replace('-', '+').replace('_', '/')
+
+              # 补齐 =
+              compact += '=' * (-len(compact) % 4)
+
+              try:
+                  decoded_bytes = base64.b64decode(
+                      compact,
+                      validate=True
+                  )
+
+                  decoded = decoded_bytes.decode(
+                      "utf-8",
+                      errors="ignore"
+                  )
+
+                  print("Base64 decoded successfully.")
+
+              except Exception as e:
+                  print("Base64 decode failed:", e)
+
+                  # --------------------------------------------------
+                  # 3. 尝试处理双重 Base64
+                  # --------------------------------------------------
+
+                  try:
+                      decoded_bytes = base64.b64decode(
+                          compact,
+                          validate=False
+                      )
+
+                      second = decoded_bytes.decode(
+                          "utf-8",
+                          errors="ignore"
+                      )
+
+                      second_compact = re.sub(
+                          r'\s+',
+                          '',
+                          second
+                      )
+
+                      second_compact = (
+                          second_compact
+                          .replace('-', '+')
+                          .replace('_', '/')
+                      )
+
+                      second_compact += '=' * (
+                          -len(second_compact) % 4
+                      )
+
+                      decoded = base64.b64decode(
+                          second_compact
+                      ).decode(
+                          "utf-8",
+                          errors="ignore"
+                      )
+
+                      print("Double Base64 decoded successfully.")
+
+                  except Exception as e2:
+                      print("Double Base64 decode failed:", e2)
+
+                      print(
+                          "The response is not a recognizable "
+                          "VLESS/Base64 subscription."
+                      )
+
+                      raise SystemExit(1)
+
+          # --------------------------------------------------
+          # 打印协议统计，不打印完整订阅
+          # --------------------------------------------------
+
+          protocols = {}
+
+          for line in decoded.splitlines():
+              line = line.strip()
+
+              if "://" not in line:
+                  continue
+
+              proto = line.split("://", 1)[0].lower()
+
+              protocols[proto] = protocols.get(proto, 0) + 1
+
+          print("Protocols:", protocols)
+
+          # --------------------------------------------------
+          # 提取公网 IP:PORT
+          # --------------------------------------------------
 
           result = set()
 
-          for line in text.splitlines():
+          for line in decoded.splitlines():
+
               line = line.strip()
 
               if not line:
                   continue
 
-              # 提取 userinfo 后面的 host:port
-              # 例如：
-              # vless://uuid@1.2.3.4:443?...
-              # trojan://password@1.2.3.4:443?...
+              # VLESS / Trojan / VMess 等 URI
               m = re.search(
-                  r"://[^@]+@(\[[0-9a-fA-F:]+\]|[^:/?#]+)(?::(\d+))?",
+                  r'^[a-zA-Z0-9+.-]+://'
+                  r'[^@\s]+@'
+                  r'($begin:math:display$\[0\-9a\-fA\-F\:\]\+$end:math:display$|'
+                  r'(?:\d{1,3}\.){3}\d{1,3})'
+                  r':(\d+)',
                   line
               )
 
               if not m:
                   continue
 
-              host = m.group(1)
-              port = m.group(2)
-
-              if not port:
-                  continue
-
-              # 去掉 IPv6 []
-              host = host.strip("[]")
+              host = m.group(1).strip("[]")
+              port = int(m.group(2))
 
               try:
                   ip = ipaddress.ip_address(host)
@@ -118,26 +200,36 @@ jobs:
                   continue
 
               # 只保留公网 IP
-              if (
-                  ip.is_private
-                  or ip.is_loopback
-                  or ip.is_reserved
-                  or ip.is_multicast
-                  or ip.is_unspecified
-                  or ip.is_link_local
-              ):
+              if not ip.is_global:
+                  continue
+
+              if not (1 <= port <= 65535):
                   continue
 
               result.add(f"{ip}:{port}")
 
-          # 排序，保证每次生成结果稳定
-          ips = sorted(result, key=lambda x: (
-              x.rsplit(":", 1)[0],
-              int(x.rsplit(":", 1)[1])
-          ))
+          ips = sorted(
+              result,
+              key=lambda x: (
+                  x.rsplit(":", 1)[0],
+                  int(x.rsplit(":", 1)[1])
+              )
+          )
+
+          print("Found public IPs:", len(ips))
 
           if not ips:
-              print("No public IPs found!")
+              print()
+              print("No public IPs found.")
+              print()
+              print(
+                  "This usually means the subscription "
+                  "does not contain literal IP addresses."
+              )
+              print(
+                  "For example, nodes may use a domain such as "
+                  "example.com instead of an IP."
+              )
               raise SystemExit(1)
 
           Path("mai.txt").write_text(
@@ -145,11 +237,9 @@ jobs:
               encoding="utf-8"
           )
 
-          print(f"Found {len(ips)} public IPs")
-          PY
+          print("mai.txt updated.")
 
-          echo "Result:"
-          cat mai.txt
+          PY
 
       - name: Commit changes
         shell: bash
@@ -162,7 +252,7 @@ jobs:
           git add mai.txt
 
           if git diff --cached --quiet; then
-            echo "mai.txt has not changed."
+            echo "No changes."
             exit 0
           fi
 
