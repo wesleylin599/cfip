@@ -9,3 +9,4 @@ update_fork.ps1
 cidrip.txt
 cidrip_failed.txt
 scan.log
+main.py
