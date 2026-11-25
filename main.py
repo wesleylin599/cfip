@@ -20,7 +20,9 @@ MAX_TIME = 5
 
 # 输入 / 输出
 CIDR_FILE = "cidr.txt"
-OUTPUT_FILE = "cidrip.txt"
+
+# 探测结果直接覆盖发布列表 ips.txt
+OUTPUT_FILE = "ips.txt"
 FAILED_FILE = "cidrip_failed.txt"
 
 
@@ -359,16 +361,19 @@ def probe(ip):
         #
         # 例如：
         #
-        # HTTP/1.1 403 Forbidden
-        # CF-RAY: xxxxx-SIN
+        # HTTP/2 403
+        # cf-ray: a601f1f73e9afddf-SIN
         #
-        # 从 CF-RAY 获取 PoP
+        # 从 cf-ray 获取 PoP
+        #
+        # 注意：HTTP/2 的头名一律小写（cf-ray:），
+        # 只有 HTTP/1.1 才是 CF-RAY:，必须忽略大小写。
         # ====================================================
 
         match = re.search(
-            r"^CF-RAY:\s*[a-fA-F0-9]+-([A-Z0-9]{3})\s*$",
+            r"^cf-ray:\s*[a-f0-9]+-([a-z0-9]{3})\s*$",
             stdout,
-            re.MULTILINE,
+            re.MULTILINE | re.IGNORECASE,
         )
 
         if match:
@@ -609,6 +614,14 @@ def main():
 
     print()
     print("[*] Writing results...")
+
+    # 按 IP 数值排序，保证 ips.txt 输出稳定
+    output_lines.sort(
+        key=lambda line: tuple(
+            int(part)
+            for part in line.split(":", 1)[0].split(".")
+        )
+    )
 
     with open(
         OUTPUT_FILE,
