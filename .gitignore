@@ -4,6 +4,8 @@ git_sync.sh
 __pycache__/
 _headers
 cfnb.log
-main.py
 setup.ps1
 update_fork.ps1
+cidrip.txt
+cidrip_failed.txt
+scan.log
