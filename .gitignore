@@ -10,3 +10,4 @@ cidrip.txt
 cidrip_failed.txt
 scan.log
 main.py
+.run.lock
